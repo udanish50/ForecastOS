@@ -1,48 +1,54 @@
-# ForecastOS v0.3 test report
+# ForecastOS v0.4 test report
 
 ## Automated suite
 
-`PYTHONPATH=src pytest -q`
-
-**Result: 10 passed.**
+```text
+13 passed
+```
 
 Coverage includes:
 
-- timestamp/target inference and time-series profiling;
-- original metric sanity checks;
-- end-to-end fast forecasting;
-- exogenous covariate forecasting;
-- Deep MLP tournament participation;
-- optional LSTM/TCN/Transformer smoke tests when PyTorch is available;
-- CSV header detection below metadata rows;
-- automatic feature audit;
-- causal missing-value preparation;
-- categorical encoding;
-- Standard, Robust, and Min-Max scaler availability;
-- extended validation metrics in the final result/leaderboard.
+- timestamp/target advisory inference
+- messy CSV header detection
+- causal missing-value preprocessing
+- categorical feature encoding
+- Standard / Robust / Min-Max scaling
+- expanded metric suite
+- end-to-end classical forecasting
+- explicit external-feature forecasting
+- Deep MLP tournament completion
+- LSTM / TCN / Transformer smoke tests when PyTorch is installed
+- exact user-selected history-window propagation
+- explicit future-feature timestamp alignment
+- prevention of silent future-covariate invention
 
-## Dirty-data integration smoke test
+## Integrated neural tournament smoke test
 
-A 28-day hourly synthetic energy series was deliberately modified with missing timestamps, duplicate timestamps, missing target observations, missing temperature, an added schedule feature, and a categorical site feature.
+A synthetic hourly energy series was trained with an explicit 12-step history window, 4-step forecast horizon and explicit future temperature trajectory.
 
-Observed preprocessing behavior:
+Models attempted:
 
-- duplicate timestamps aggregated;
-- missing values reduced to zero in the model-ready frame;
-- categorical feature encoded;
-- target and timestamp detected correctly;
-- the experiment successfully trained under all three supported scaler modes.
+```text
+Naive
+Seasonal Naive
+Drift
+Ridge AR
+Deep MLP AR
+LSTM
+TCN
+Transformer
+```
 
-Example fast-mode outcomes from this synthetic run:
+Result:
 
-| Scaler | Selected model | RMSE | WAPE | R² | Trust |
-|---|---|---:|---:|---:|---:|
-| Standard | Ridge AR | 2.9389 | 2.11% | 0.513 | 97.9 |
-| Robust | Ridge AR | 3.2080 | 2.28% | 0.402 | 97.1 |
-| Min-Max | Ridge AR | 3.3253 | 2.34% | 0.358 | 97.2 |
+```text
+All model failures: none
+History window in diagnostics: 12
+Future temperature baseline preserved exactly
+```
 
-These numbers validate pipeline execution; they are not product-performance claims because the dataset is synthetic.
+The final winner was selected only by rolling temporal backtest performance.
 
-## Static validation
+## UI validation limitation
 
-The Streamlit entrypoint and all package modules compile successfully with Python `py_compile`.
+The complete Streamlit source compiles successfully. The current execution sandbox does not have Streamlit installed, so browser rendering was not executed here. GitHub/Streamlit deployment installs the declared dependencies from `requirements.txt`.

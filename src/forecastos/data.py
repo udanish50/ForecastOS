@@ -442,3 +442,82 @@ def prepare_frame(
     )
     out = work.reset_index(drop=True)
     return (out, warnings, report) if return_report else (out, warnings)
+
+
+def prepare_future_features(
+    future_df: pd.DataFrame,
+    feature_mapping: dict[str, str],
+    prep_report: PreprocessingReport,
+    history_df: pd.DataFrame,
+    horizon: int,
+    *,
+    expected_timestamps: list[pd.Timestamp] | None = None,
+    future_timestamp_col: str | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Validate and encode explicitly supplied future covariates.
+
+    ForecastOS deliberately does not invent future weather/exogenous values.
+    The caller maps each training feature to a future-data column.  If a future
+    timestamp is supplied, rows must cover the exact expected forecast times;
+    otherwise row order is used explicitly.
+    """
+    if horizon < 1:
+        raise ValueError("Forecast horizon must be at least 1 step.")
+    if not feature_mapping:
+        return pd.DataFrame(index=range(horizon)), []
+
+    src = future_df.copy()
+    warnings: list[str] = []
+    missing_source = [c for c in feature_mapping.values() if c not in src.columns]
+    if missing_source:
+        raise ValueError(f"Future data is missing mapped column(s): {missing_source}")
+
+    if future_timestamp_col:
+        if future_timestamp_col not in src.columns:
+            raise ValueError(f"Future timestamp column '{future_timestamp_col}' was not found.")
+        src[future_timestamp_col] = pd.to_datetime(src[future_timestamp_col], errors="coerce")
+        bad = int(src[future_timestamp_col].isna().sum())
+        if bad:
+            raise ValueError(f"Future data contains {bad} invalid timestamp value(s). Fix them before forecasting.")
+        src = src.sort_values(future_timestamp_col).drop_duplicates(future_timestamp_col, keep="last")
+        if expected_timestamps is None:
+            raise ValueError("Expected forecast timestamps are required when aligning future data by timestamp.")
+        expected = pd.DatetimeIndex([pd.Timestamp(x) for x in expected_timestamps[:horizon]])
+        indexed = src.set_index(future_timestamp_col)
+        missing_ts = expected.difference(indexed.index)
+        if len(missing_ts):
+            preview = ", ".join(str(x) for x in missing_ts[:3])
+            raise ValueError(f"Future data does not cover {len(missing_ts)} required forecast timestamp(s), including {preview}.")
+        src = indexed.loc[expected].reset_index(drop=True)
+    else:
+        if len(src) < horizon:
+            raise ValueError(f"Future data has {len(src)} rows, but the forecast horizon requires {horizon} rows.")
+        src = src.iloc[:horizon].reset_index(drop=True)
+        warnings.append("Future features are aligned by row order because no future timestamp column was selected.")
+
+    out = pd.DataFrame(index=range(horizon))
+    for train_feature, future_col in feature_mapping.items():
+        series = src[future_col]
+        if train_feature in prep_report.numeric_features:
+            vals = pd.to_numeric(series.astype(str).str.replace(",", "", regex=False), errors="coerce").replace([np.inf, -np.inf], np.nan)
+            missing_before = int(vals.isna().sum())
+            vals = vals.ffill()
+            if vals.isna().any() and train_feature in history_df.columns and len(history_df):
+                vals = vals.fillna(float(pd.to_numeric(history_df[train_feature], errors="coerce").iloc[-1]))
+            if vals.isna().any():
+                raise ValueError(f"Future numeric feature '{train_feature}' still contains missing values after forward filling.")
+            if missing_before:
+                warnings.append(f"Forward-filled {missing_before} missing future value(s) for '{train_feature}'.")
+            out[train_feature] = vals.astype(float).to_numpy()
+        else:
+            mapping = prep_report.categorical_encoding.get(train_feature, {})
+            vals = series.astype("string").replace("<NA>", np.nan).ffill()
+            encoded = vals.map(mapping)
+            unknown_mask = encoded.isna() & vals.notna()
+            if int(unknown_mask.sum()):
+                unknowns = sorted(set(str(x) for x in vals[unknown_mask].tolist()))
+                warnings.append(f"Future feature '{train_feature}' contains unseen categor{'y' if len(unknowns)==1 else 'ies'} {unknowns[:3]}; encoded as -1.")
+            encoded = encoded.fillna(-1).astype(float)
+            out[train_feature] = encoded.to_numpy()
+
+    return out, warnings

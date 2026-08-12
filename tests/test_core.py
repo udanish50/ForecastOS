@@ -6,7 +6,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from forecastos.data import infer_target_column, infer_timestamp_column, prepare_frame
+from forecastos.data import infer_target_column, infer_timestamp_column, prepare_frame, prepare_future_features
 from forecastos.engine import train_forecast
 from forecastos.metrics import mae, rmse, smape
 from forecastos.profile import profile_timeseries
@@ -49,7 +49,9 @@ def test_exogenous_scenario_capable_model_can_train():
     raw = make_sample(24 * 35)
     work, _ = prepare_frame(raw, "timestamp", "load", ["temperature"])
     profile = profile_timeseries(work, "timestamp", "load")
-    result = train_forecast(work, "timestamp", "load", ["temperature"], profile, horizon=8, mode="Balanced")
+    import pandas as pd
+    future = pd.concat([work[["temperature"]].tail(1)] * 8, ignore_index=True)
+    result = train_forecast(work, "timestamp", "load", ["temperature"], profile, horizon=8, mode="Balanced", future_exog=future)
     assert len(result.forecast) == 8
 
 
@@ -66,8 +68,11 @@ def test_deep_mlp_can_join_tournament():
         horizon=6,
         mode="Fast",
         deep_model_names=["Deep MLP AR"],
+        history_window=12,
+        future_exog=__import__("pandas").concat([work[["temperature"]].tail(1)] * 6, ignore_index=True),
     )
     assert "Deep MLP AR" in result.diagnostics["models_attempted"]
+    assert "Deep MLP AR" not in result.diagnostics["model_failures"]
     assert len(result.forecast) == 6
 
 
@@ -157,3 +162,52 @@ def test_extended_metrics_present_in_forecast():
     for key in ["MdAE", "NRMSE(std)", "MAPE", "WAPE", "R²", "Bias", "Directional accuracy (%)"]:
         assert key in result.metrics
         assert key in result.leaderboard.columns
+
+
+def test_explicit_history_window_controls_lag_features():
+    raw = make_sample(24 * 20)
+    work, _ = prepare_frame(raw, "timestamp", "load", [])
+    profile = profile_timeseries(work, "timestamp", "load")
+    result = train_forecast(work, "timestamp", "load", [], profile, horizon=4, mode="Fast", history_window=18)
+    assert result.diagnostics["history_window"] == 18
+    if result.model_name in {"Ridge AR", "HistGradientBoosting AR", "Deep MLP AR"}:
+        fitted = result.fitted_model
+        assert max(fitted.lags) == 18
+        assert len(fitted.lags) == 18
+
+
+def test_future_features_are_explicit_and_timestamp_aligned():
+    import pandas as pd
+    from forecastos.engine import future_timestamps
+
+    raw = make_sample(24 * 10)
+    work, _, report = prepare_frame(raw, "timestamp", "load", ["temperature"], return_report=True)
+    profile = profile_timeseries(work, "timestamp", "load")
+    horizon = 5
+    expected = future_timestamps(work["timestamp"].iloc[-1], profile.median_step_seconds, horizon)
+    fut = pd.DataFrame({"when": expected, "temp_fcst": [10, 11, 12, 13, 14]})
+    encoded, warnings = prepare_future_features(
+        fut,
+        {"temperature": "temp_fcst"},
+        report,
+        work,
+        horizon,
+        expected_timestamps=expected,
+        future_timestamp_col="when",
+    )
+    assert encoded["temperature"].tolist() == [10, 11, 12, 13, 14]
+    result = train_forecast(
+        work, "timestamp", "load", ["temperature"], profile,
+        horizon=horizon, mode="Fast", history_window=12, future_exog=encoded,
+    )
+    assert result.diagnostics["future_exog_provided"] is True
+    assert result.diagnostics["future_exog_baseline"]["temperature"].tolist() == [10, 11, 12, 13, 14]
+
+
+def test_selected_future_features_cannot_be_silently_invented():
+    import pytest
+    raw = make_sample(24 * 10)
+    work, _ = prepare_frame(raw, "timestamp", "load", ["temperature"])
+    profile = profile_timeseries(work, "timestamp", "load")
+    with pytest.raises(ValueError, match="Future feature values are required"):
+        train_forecast(work, "timestamp", "load", ["temperature"], profile, horizon=4, mode="Fast", history_window=12)

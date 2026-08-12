@@ -6,25 +6,25 @@
 
 ForecastOS is intentionally **decision-first**. It does not assume a neural model is best, and it does not use an LLM to generate the numerical forecast. Every candidate model must compete against simple temporal baselines using rolling backtests.
 
-## v0.3 robust preprocessing
+## v0.4 explicit windowing + future-feature control
 
-ForecastOS now automatically detects messy CSV/Excel headers, identifies numeric/categorical/ID/sparse/leakage-like features, repairs bounded time-grid gaps, handles missing values causally, encodes selected categorical covariates, and supports Auto/Standard/Robust/Min-Max scaling. Scaling is fitted inside each temporal training fold for models that need it.
+ForecastOS now uses an explicit forecast-configuration workflow. The user selects the timestamp, target, previous-history window, future horizon and future-known features. Automatic timestamp/target inference is advisory only and never silently commits the experiment.
 
-Validation now includes MAE, MdAE, RMSE, NRMSE(std), MAPE, sMAPE, WAPE, MASE, R², signed bias, directional accuracy, and skill versus the seasonal-naïve baseline. See [`PREPROCESSING.md`](PREPROCESSING.md) for the full policy.
-
+The app creates sliding windows internally, requires explicit future weather/exogenous values when such features are selected, aligns them by timestamp or deliberate row order, and supports Standard, Robust and Min-Max scaling. It will not silently carry the last observed weather value into the future. See [`WINDOWING.md`](WINDOWING.md) and [`PREPROCESSING.md`](PREPROCESSING.md).
 
 ## What is included
 
 ### Data intelligence
 
-- Automatic timestamp and target inference
+- Explicit timestamp and target mapping; automatic inference is advisory only
 - Frequency and regularity detection
 - Missing-target and duplicate-timestamp checks
 - Seasonality candidates and selected seasonal period
 - Lag-1 autocorrelation
 - Trend-strength indicator
 - Drift indicator
-- Explicit known-at-forecast-time covariate selection to reduce leakage risk
+- Explicit previous-step history window and future forecast horizon
+- Explicit future-known covariate selection with required future data
 - Data-readiness state before training
 
 ### Forecast model tournament
@@ -158,7 +158,7 @@ Minimum:
 | 2026-01-01 00:00 | 100.2 |
 | 2026-01-01 01:00 | 104.7 |
 
-Optional numeric covariates may be selected when they are genuinely available at forecast time.
+Optional covariates may be selected only when their future values are genuinely available at forecast time. ForecastOS generates a future-feature template for those variables.
 
 ## Important interpretation boundaries
 
@@ -166,7 +166,7 @@ Optional numeric covariates may be selected when they are genuinely available at
 - The 90% band is an empirical residual-based interval, not a formal coverage guarantee.
 - Feature importance measures predictive sensitivity, not causality.
 - Scenario analysis describes model response, not causal intervention effects.
-- Final future covariates currently default to their latest observed value unless changed in the scenario lab.
+- Selected future covariates must be explicitly supplied for every forecast step; ForecastOS does not invent them.
 - Deep learning can overfit short series; it is never exempt from baseline comparison.
 
 ## Foundation-model roadmap
@@ -213,6 +213,7 @@ forecastos/
 ├── tests/test_core.py
 ├── streamlit_app.py
 ├── HUMAN_FACTORS.md
+├── WINDOWING.md
 ├── ARCHITECTURE.md
 ├── DEPLOYMENT.md
 ├── TEST_REPORT.md

@@ -34,8 +34,8 @@ def _make_future_exog(train: pd.DataFrame, exog_cols: list[str], horizon: int, o
     return pd.DataFrame(rows)
 
 
-def _fold_origins(n: int, horizon: int, n_folds: int) -> list[int]:
-    min_train = max(20, horizon * 2)
+def _fold_origins(n: int, horizon: int, n_folds: int, history_window: int = 1) -> list[int]:
+    min_train = max(20, horizon * 2, int(history_window) + 12)
     last_origin = n - horizon
     if last_origin <= min_train:
         return [max(10, last_origin)] if last_origin > 10 else []
@@ -56,7 +56,7 @@ def backtest_model(
     start = time.perf_counter()
     pred_rows, metric_rows = [], []
     try:
-        origins = _fold_origins(len(df), horizon, n_folds)
+        origins = _fold_origins(len(df), horizon, n_folds, int(getattr(model, "history_window", 1) or 1))
         if not origins:
             raise ValueError("Not enough observations for the requested horizon and backtesting.")
         for fold, origin in enumerate(origins, start=1):
@@ -147,12 +147,14 @@ def train_forecast(
     deep_model_names: list[str] | None = None,
     progress_callback=None,
     scaler_kind: str = "standard",
+    history_window: int | None = None,
+    future_exog: pd.DataFrame | None = None,
 ) -> ForecastResult:
     n_folds = {"fast": 2, "balanced": 3, "maximum accuracy": 4}.get(mode.lower(), 3)
     deep_model_names = list(deep_model_names or [])
     include_mlp = "Deep MLP AR" in deep_model_names
     torch_names = [n for n in deep_model_names if n in {"LSTM", "TCN", "Transformer"}]
-    models = build_model_zoo(mode, include_mlp=include_mlp, deep_model_names=torch_names, scaler_kind=scaler_kind)
+    models = build_model_zoo(mode, include_mlp=include_mlp, deep_model_names=torch_names, scaler_kind=scaler_kind, history_window=history_window)
     results = []
     for idx, model in enumerate(models, start=1):
         if progress_callback is not None:
@@ -174,7 +176,17 @@ def train_forecast(
     model_template = next(m for m in models if m.name == best.model_name)
     fitted = copy.deepcopy(model_template).fit(df, timestamp_col, target_col, exog_cols, profile.selected_seasonal_period)
     fts = future_timestamps(pd.Timestamp(df[timestamp_col].iloc[-1]), profile.median_step_seconds, horizon)
-    fex = _make_future_exog(df, exog_cols, horizon)
+    if exog_cols:
+        if future_exog is None:
+            raise ValueError("Future feature values are required for the selected forecast-time features. Upload/provide one row per forecast step, or run without those features.")
+        missing_cols = [c for c in exog_cols if c not in future_exog.columns]
+        if missing_cols:
+            raise ValueError(f"Future feature data is missing columns: {missing_cols}")
+        if len(future_exog) < horizon:
+            raise ValueError(f"Future feature data has {len(future_exog)} rows but the forecast horizon requires {horizon} rows.")
+        fex = future_exog[exog_cols].iloc[:horizon].reset_index(drop=True).copy()
+    else:
+        fex = None
     pred = fitted.predict(horizon, fts, fex)
     errors = np.abs(best.predictions["error"].to_numpy(dtype=float))
     global_q = float(np.quantile(errors, 0.90)) if len(errors) else 0.0
@@ -211,6 +223,8 @@ def train_forecast(
         "model_failures": {r.model_name: r.failure for r in results if r.failure},
         "models_attempted": [r.model_name for r in results],
         "scaler_kind": scaler_kind,
+        "history_window": int(history_window) if history_window is not None else None,
+        "future_exog_provided": future_exog is not None,
     }
     return ForecastResult(best.model_name, forecast, best.aggregate_metrics, trust, components, leaderboard, _feature_importance(fitted), diagnostics, fitted)
 
@@ -219,7 +233,10 @@ def scenario_forecast(result: ForecastResult, df: pd.DataFrame, timestamp_col: s
     if result.fitted_model is None or not getattr(result.fitted_model, "supports_exog", False) or column not in exog_cols:
         raise ValueError("The selected winning model does not support scenario covariates.")
     horizon = len(result.forecast)
-    base = _make_future_exog(df, exog_cols, horizon)
+    base = result.diagnostics.get("future_exog_baseline")
+    if base is None:
+        raise ValueError("No explicit future feature baseline was supplied for this forecast.")
+    base = base.copy().reset_index(drop=True)
     scenario = base.copy()
     scenario[column] = pd.to_numeric(scenario[column], errors="coerce") * (1 + pct_change / 100.0)
     fts = [pd.Timestamp(x) for x in result.forecast["timestamp"]]
@@ -250,7 +267,9 @@ def stress_test(result: ForecastResult, df: pd.DataFrame, timestamp_col: str, ta
         model = copy.deepcopy(result.fitted_model)
         try:
             model.fit(alt_df, timestamp_col, target_col, exog_cols, profile.selected_seasonal_period)
-            fex = _make_future_exog(alt_df, exog_cols, horizon)
+            fex = result.diagnostics.get("future_exog_baseline")
+            if exog_cols and fex is None:
+                raise ValueError("Stress testing requires the explicit future feature baseline used by the forecast.")
             pred = model.predict(horizon, fts, fex)
             sensitivity = float(100 * np.mean(np.abs(pred - baseline)) / (np.mean(np.abs(baseline)) + 1e-8))
             stability = float(np.clip(100 - 5 * sensitivity, 0, 100))

@@ -13,291 +13,426 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from forecastos.analyst import ask_openai, deterministic_brief
-from forecastos.data import analyze_features, infer_target_column, infer_timestamp_column, prepare_frame, read_table
+from forecastos.data import (
+    analyze_features,
+    infer_target_column,
+    infer_timestamp_column,
+    prepare_frame,
+    prepare_future_features,
+    read_table,
+)
 from forecastos.deep_models import torch_available
-from forecastos.engine import scenario_forecast, stress_test, train_forecast
+from forecastos.engine import future_timestamps, scenario_forecast, stress_test, train_forecast
 from forecastos.human_factors import compute_estimate, model_plain_name, readiness, trust_label
 from forecastos.profile import profile_timeseries
 from forecastos.scaling import SCALER_LABELS, recommend_scaler
 from forecastos.sample import make_sample
 
 st.set_page_config(
-    page_title="ForecastOS · Autonomous Forecast Scientist",
+    page_title="ForecastOS · Forecast Studio",
     page_icon="◈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# Human-factors goals: calm hierarchy, high contrast, keyboard-visible focus,
-# generous target sizes, restrained motion, and readable line lengths.
 st.markdown(
     """
 <style>
-:root { --fos-blue:#1D4ED8; --fos-ink:#111827; --fos-muted:#4B5563; --fos-border:#D7DEE8; --fos-soft:#F7F9FC; }
-.block-container {max-width: 1380px; padding-top: 1.15rem; padding-bottom: 3rem;}
-html, body, [class*="css"] {line-height: 1.55;}
-.hero {padding: 1.55rem 1.7rem; border: 1px solid var(--fos-border); border-radius: 18px; background: linear-gradient(180deg,#fff,#fbfcff); margin-bottom: .9rem;}
-.hero h1 {margin: 0 0 .2rem 0; font-size: clamp(2rem,4vw,2.65rem); letter-spacing:-.03em; color:var(--fos-ink);}
-.hero p {max-width: 850px; margin:.35rem 0 0; color:var(--fos-muted); font-size:1.02rem;}
-.eyebrow {font-size:.78rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#3157A4;}
-.fos-card {border:1px solid var(--fos-border); border-radius:16px; padding:1rem 1.1rem; background:#fff; height:100%;}
-.fos-card h3 {font-size:1rem; margin:0 0 .25rem;}
-.fos-card p {margin:.15rem 0; color:var(--fos-muted);}
-.fos-note {border-left:4px solid #64748B; background:#F8FAFC; padding:.75rem .9rem; border-radius:8px; margin:.6rem 0;}
-.fos-success {border-left-color:#15803D; background:#F0FDF4;}
-.fos-review {border-left-color:#A16207; background:#FFFBEB;}
-.fos-caution {border-left-color:#B91C1C; background:#FEF2F2;}
-.small-muted {color:var(--fos-muted); font-size:.88rem;}
-div[data-testid="stMetric"] {border:1px solid var(--fos-border); padding:.8rem .9rem; border-radius:14px; background:#fff; min-height:105px;}
-button, [role="button"], input, select, textarea {min-height: 40px;}
-*:focus-visible {outline:3px solid #2563EB !important; outline-offset:2px !important;}
-[data-testid="stSidebar"] {border-right:1px solid #E5E7EB;}
-[data-testid="stSidebar"] .block-container {padding-top:1.2rem;}
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; scroll-behavior:auto !important;}
-}
+:root {--ink:#111827;--muted:#5B6472;--line:#DDE3EA;--soft:#F7F9FC;--accent:#1D4ED8;--ok:#166534;--warn:#92400E;--bad:#991B1B;}
+.block-container{max-width:1320px;padding-top:1.1rem;padding-bottom:4rem;}
+h1,h2,h3{letter-spacing:-.02em;color:var(--ink)}
+p,li{line-height:1.55}
+.fos-top{border-bottom:1px solid var(--line);padding:.2rem 0 1rem;margin-bottom:1.2rem}
+.fos-top h1{font-size:2.05rem;margin:0}.fos-top p{color:var(--muted);margin:.25rem 0 0;max-width:900px}
+.step{display:flex;align-items:center;gap:.65rem;margin:1.8rem 0 .7rem}.step-num{width:30px;height:30px;border-radius:9px;background:#EEF3FF;color:#24499B;font-weight:800;display:flex;align-items:center;justify-content:center}.step h2{font-size:1.25rem;margin:0}
+.panel{border:1px solid var(--line);border-radius:16px;padding:1rem 1.1rem;background:white;margin-bottom:.7rem}.panel p{color:var(--muted);margin:.25rem 0}
+.window{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);background:var(--soft);padding:.8rem 1rem;border-radius:12px;overflow:auto;white-space:nowrap}
+.note{border-left:4px solid #64748B;background:#F8FAFC;padding:.72rem .9rem;border-radius:8px;margin:.55rem 0}.note.ok{border-color:#15803D;background:#F0FDF4}.note.warn{border-color:#B45309;background:#FFFBEB}.note.bad{border-color:#B91C1C;background:#FEF2F2}
+.small{font-size:.88rem;color:var(--muted)}
+div[data-testid="stMetric"]{border:1px solid var(--line);padding:.78rem .88rem;border-radius:14px;background:white;min-height:102px}
+button,[role="button"],input,select,textarea{min-height:42px}*:focus-visible{outline:3px solid #2563EB!important;outline-offset:2px!important}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;transition-duration:.001ms!important}}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-def card(title: str, body: str, eyebrow: str | None = None) -> None:
-    top = f'<div class="eyebrow">{eyebrow}</div>' if eyebrow else ""
-    st.markdown(f'<div class="fos-card">{top}<h3>{title}</h3><p>{body}</p></div>', unsafe_allow_html=True)
+def step_header(number: int, title: str) -> None:
+    st.markdown(f'<div class="step"><div class="step-num">{number}</div><h2>{title}</h2></div>', unsafe_allow_html=True)
 
 
 def note(text: str, level: str = "neutral") -> None:
-    klass = {"ready": "fos-success", "review": "fos-review", "caution": "fos-caution"}.get(level, "")
-    st.markdown(f'<div class="fos-note {klass}">{text}</div>', unsafe_allow_html=True)
+    cls = {"ok": "ok", "warn": "warn", "bad": "bad"}.get(level, "")
+    st.markdown(f'<div class="note {cls}">{text}</div>', unsafe_allow_html=True)
 
 
-def clear_experiment() -> None:
-    for key in ["forecast_result", "forecast_profile", "forecast_work", "forecast_config", "stress", "scenario"]:
-        st.session_state.pop(key, None)
+def span_text(steps: int, step_seconds: float) -> str:
+    if not np.isfinite(step_seconds) or step_seconds <= 0:
+        return f"{steps} steps"
+    sec = steps * step_seconds
+    if sec < 3600:
+        return f"{steps} steps ≈ {sec/60:.0f} minutes"
+    if sec < 86400:
+        return f"{steps} steps ≈ {sec/3600:.1f} hours"
+    return f"{steps} steps ≈ {sec/86400:.1f} days"
+
+
+def clear_results() -> None:
+    for k in ["forecast_result", "forecast_profile", "forecast_work", "forecast_config", "stress", "scenario"]:
+        st.session_state.pop(k, None)
 
 
 st.markdown(
     """
-<div class="hero">
-  <div class="eyebrow">ForecastOS</div>
-  <h1>Forecast with evidence, not guesswork.</h1>
-  <p>Upload a time series, benchmark statistical, machine-learning and optional deep-learning models, then inspect uncertainty, trust, explanations and stress tests before using the forecast.</p>
+<div class="fos-top">
+  <h1>ForecastOS</h1>
+  <p>Configure the forecasting problem explicitly. ForecastOS will not silently choose your target, history window, forecast horizon, or future weather/features.</p>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-intro_cols = st.columns(3)
-with intro_cols[0]:
-    card("1 · Understand the data", "ForecastOS checks frequency, seasonality, missingness, drift and whether the requested horizon is reasonable.")
-with intro_cols[1]:
-    card("2 · Compete models fairly", "Models are compared using rolling temporal backtests. A complex neural model wins only when the evidence supports it.")
-with intro_cols[2]:
-    card("3 · Decide with context", "Forecast intervals, trust components, explanations and stress tests are shown before export or AI interpretation.")
-
-with st.sidebar:
-    st.header("Set up forecast")
-    st.caption("Required choices are shown first. Advanced controls are optional.")
-    source = st.radio("Data", ["Built-in energy demo", "Upload my data"], index=0, help="Use the demo to learn the workflow before uploading sensitive or business data.")
-    uploaded = None
-    if source == "Upload my data":
-        uploaded = st.file_uploader("Choose CSV, Excel, or Parquet", type=["csv", "xlsx", "xls", "parquet"])
-    if st.button("Start a new experiment", use_container_width=True, help="Clears trained results from this browser session but does not delete your uploaded source file."):
-        clear_experiment()
-        st.rerun()
-
-if source == "Built-in energy demo":
-    raw = make_sample()
-    read_meta = None
-elif uploaded is not None:
+# -----------------------------------------------------------------------------
+# 1. DATA
+# -----------------------------------------------------------------------------
+step_header(1, "Choose the data")
+source = st.radio("Data source", ["Upload my dataset", "Built-in energy example"], horizontal=True, label_visibility="collapsed")
+read_meta = None
+uploaded = None
+if source == "Upload my dataset":
+    uploaded = st.file_uploader("Historical dataset", type=["csv", "xlsx", "xls", "parquet"], help="Use one chronological table. You do not need to pre-build lag/sliding-window columns.")
+    if uploaded is None:
+        st.info("Upload a historical dataset to begin. The table should contain a timestamp column and the target you want to forecast.")
+        st.stop()
     try:
         raw, read_meta = read_table(uploaded, return_metadata=True)
     except Exception as exc:
-        st.error(f"I couldn't read this file. {exc}")
+        st.error(f"Could not read the historical file: {exc}")
         st.stop()
 else:
-    st.info("Upload a dataset to continue. Minimum format: one timestamp column and one numeric target column.")
-    st.stop()
+    raw = make_sample()
 
 if len(raw) > 250_000:
-    st.warning("This public-demo configuration uses the most recent 250,000 rows to protect shared memory. The original file is not modified.")
+    st.warning("The interactive Streamlit build uses the most recent 250,000 rows to protect memory. The uploaded source file is not changed.")
     raw = raw.tail(250_000).copy()
 
-default_ts = infer_timestamp_column(raw)
-default_target = infer_target_column(raw, default_ts)
-if default_ts is None or default_target is None:
-    st.error("ForecastOS could not safely identify both a timestamp and numeric target. Check that the dataset contains both, then upload again.")
-    st.stop()
-
-with st.sidebar:
-    st.divider()
-    st.subheader("What should be forecast?")
-    columns = list(raw.columns)
-    ts_col = st.selectbox("Time column", columns, index=columns.index(default_ts), help="A timestamp identifies when each observation occurred.")
-    numeric_candidates = []
-    for c in columns:
-        if c == ts_col:
-            continue
-        converted = pd.to_numeric(raw[c].astype(str).str.replace(",", "", regex=False), errors="coerce")
-        if converted.notna().mean() >= 0.8:
-            numeric_candidates.append(c)
-    if not numeric_candidates:
-        st.error("No reliably numeric target column was found.")
-        st.stop()
-    target_default_idx = numeric_candidates.index(default_target) if default_target in numeric_candidates else 0
-    target_col = st.selectbox("Target to predict", numeric_candidates, index=target_default_idx)
-
-    feature_scan = analyze_features(raw, ts_col, target_col)
-    usable_features = feature_scan.loc[feature_scan["recommended_usable"], "feature"].tolist() if not feature_scan.empty else []
-    suggested_features = feature_scan.loc[feature_scan["suggested_known_future"], "feature"].tolist() if not feature_scan.empty else []
-    exog_cols = st.multiselect(
-        "Features known at forecast time",
-        usable_features,
-        default=[c for c in suggested_features if c in usable_features],
-        help="ForecastOS detects usable features automatically, but only future-known variables are safe as covariates. Suggested defaults are conservative; confirm what will genuinely be available at prediction time.",
-    )
-
-    with st.expander("Preprocessing controls", expanded=False):
-        regularize_grid = st.checkbox(
-            "Repair manageable timestamp gaps",
-            value=True,
-            help="ForecastOS can rebuild a regular time grid when the inferred interval is reliable and the expansion is bounded. Missing target values are filled causally from prior observations.",
-        )
-        scaler_choice = st.selectbox(
-            "Normalization / standardization",
-            ["Auto", "Standard", "Robust", "Min-Max"],
-            index=0,
-            help="Auto selects among z-score StandardScaler, median/IQR RobustScaler, and [0,1] MinMaxScaler. Scalers are fitted inside each training fold to reduce leakage.",
-        )
-
-profile_raw = profile_timeseries(raw, ts_col, target_col)
-work, prep_warnings, prep_report = prepare_frame(raw, ts_col, target_col, exog_cols, regularize=regularize_grid, return_report=True)
-profile = profile_timeseries(work, ts_col, target_col)
-auto_scaler, scaler_diag = recommend_scaler(work, [target_col] + prep_report.model_features)
-scaler_kind = auto_scaler if scaler_choice == "Auto" else {"Standard": "standard", "Robust": "robust", "Min-Max": "minmax"}[scaler_choice]
-
-max_h = max(1, min(336, len(work) // 5))
-default_h = min(max_h, 24 if profile.median_step_seconds <= 3600 * 1.2 else 7)
-
-with st.sidebar:
-    horizon = st.number_input(
-        "Forecast horizon (steps)",
-        min_value=1,
-        max_value=max_h,
-        value=int(default_h),
-        step=1,
-        help=f"One step is approximately {profile.inferred_frequency}. ForecastOS limits the horizon to protect backtest quality.",
-    )
-    st.divider()
-    st.subheader("Model effort")
-    goal = st.radio(
-        "Optimization goal",
-        ["Balanced", "Fast exploration", "Maximum accuracy"],
-        index=0,
-        help="Balanced is recommended for most interactive use. Maximum accuracy uses more backtest folds and model training.",
-    )
-    mode = {"Balanced": "Balanced", "Fast exploration": "Fast", "Maximum accuracy": "Maximum accuracy"}[goal]
-
-    with st.expander("Deep learning lab", expanded=False):
-        st.caption("Deep learning is optional. ForecastOS still keeps naïve and classical baselines in the tournament.")
-        deep_enabled = st.checkbox("Include deep-learning models", value=False)
-        available_deep = ["Deep MLP AR"]
-        torch_ok = torch_available()
-        if torch_ok:
-            available_deep += ["LSTM", "TCN", "Transformer"]
-        else:
-            st.info("LSTM, TCN and Transformer require the optional PyTorch dependencies in `requirements-deep.txt`.")
-        default_deep = ["Deep MLP AR", "LSTM"] if torch_ok else ["Deep MLP AR"]
-        deep_models = st.multiselect(
-            "Models",
-            available_deep,
-            default=default_deep if deep_enabled else [],
-            disabled=not deep_enabled,
-            help="Deep MLP is CPU-native in the standard install. LSTM, TCN and Transformer are optional PyTorch sequence models.",
-        )
-        st.caption("Neural models are selected only if they beat simpler alternatives on rolling backtests.")
-    if not deep_enabled:
-        deep_models = []
-
-    burden, burden_text = compute_estimate(len(work), mode, deep_models)
-    st.caption(f"Compute burden: **{burden}** · {burden_text}")
-    run = st.button("Run model tournament", type="primary", use_container_width=True)
-
-# ---------- Data readiness ----------
-st.markdown("## Data readiness")
-read = readiness(profile, int(horizon), len(work))
-rcols = st.columns([1.25, 1, 1, 1, 1])
-with rcols[0]:
-    note(f"<strong>{read.label}</strong><br><span class='small-muted'>{read.summary}</span>", read.level)
-rcols[1].metric("Usable rows", f"{len(work):,}")
-rcols[2].metric("Frequency", profile.inferred_frequency)
-rcols[3].metric("Regular timestamps", f"{profile.regularity_score*100:.0f}%", help="Share of time gaps close to the median interval.")
-rcols[4].metric("Drift indicator", f"{profile.drift_score*100:.0f}/100", help="A simple distribution-shift indicator comparing earlier and recent target levels.")
-
-warnings = list(dict.fromkeys(profile_raw.warnings + prep_warnings + read.issues))
-if warnings:
-    with st.expander(f"Review {len(warnings)} data note{'s' if len(warnings) != 1 else ''}", expanded=read.level == "caution"):
-        for w in warnings:
-            st.warning(w)
-else:
-    st.success("No major data-quality warning was detected by the prototype checks.")
-
-with st.expander("Automatic preprocessing & feature audit", expanded=False):
+meta_cols = st.columns(4)
+meta_cols[0].metric("Rows", f"{len(raw):,}")
+meta_cols[1].metric("Columns", f"{len(raw.columns):,}")
+meta_cols[2].metric("Missing cells", f"{int(raw.isna().sum().sum()):,}")
+header_text = "Built-in schema"
+if read_meta is not None:
+    header_text = "Generic names" if read_meta.detected_header_row is None else f"Header row {read_meta.detected_header_row + 1}"
+meta_cols[3].metric("Table header", header_text)
+with st.expander("Preview raw data"):
+    st.dataframe(raw.head(30), use_container_width=True, hide_index=True)
     if read_meta is not None:
-        h = "No header detected" if read_meta.detected_header_row is None else f"Row {read_meta.detected_header_row + 1}"
-        st.write(f"**Header detection:** {h}" + (f" · delimiter `{read_meta.delimiter}`" if read_meta.delimiter else ""))
         for msg in read_meta.notes:
             st.caption(msg)
-    pc = st.columns(5)
-    pc[0].metric("Rows in", f"{prep_report.original_rows:,}")
-    pc[1].metric("Rows ready", f"{prep_report.final_rows:,}")
-    pc[2].metric("Duplicate times", f"{prep_report.duplicate_timestamps_aggregated:,}")
-    pc[3].metric("Inserted gaps", f"{prep_report.inserted_time_rows:,}")
-    pc[4].metric("Missing after prep", f"{prep_report.target_missing_after + prep_report.feature_missing_after:,}")
-    st.write(f"**Scaling:** {SCALER_LABELS[scaler_kind]}" + (" · automatically selected" if scaler_choice == "Auto" else " · user selected"))
-    if scaler_choice == "Auto":
-        st.caption(str(scaler_diag.get("reason", "")))
-    if not prep_report.feature_table.empty:
-        st.dataframe(
-            prep_report.feature_table.style.format({"missing_%": "{:.1f}"}),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.caption("Feature detection identifies candidates, constants, sparse columns, IDs and possible leakage. A detected feature is not automatically assumed to be known in the future.")
 
-preview = work[[ts_col, target_col] + prep_report.model_features].tail(min(5000, len(work)))
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=preview[ts_col], y=preview[target_col], name=target_col, mode="lines", line=dict(width=1.7)))
-fig.update_layout(
-    height=315,
-    margin=dict(l=8, r=8, t=12, b=8),
-    hovermode="x unified",
-    xaxis_title="Time",
-    yaxis_title=target_col,
-    legend_title_text="",
+# -----------------------------------------------------------------------------
+# 2. EXPLICIT MAPPING
+# -----------------------------------------------------------------------------
+step_header(2, "Map the forecasting columns")
+columns = list(raw.columns)
+if source == "Built-in energy example":
+    ts_default = columns.index("timestamp") if "timestamp" in columns else None
+else:
+    ts_default = None
+
+ts_col = st.selectbox(
+    "Timestamp column",
+    columns,
+    index=ts_default,
+    placeholder="Choose the timestamp column",
+    help="ForecastOS does not automatically commit to a timestamp column. You choose it here.",
 )
-st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
-with st.expander("See detected time-series fingerprint"):
-    f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Seasonal period", str(profile.selected_seasonal_period))
-    f2.metric("Lag-1 correlation", f"{profile.autocorr_lag1:.2f}")
-    f3.metric("Trend strength", f"{profile.trend_strength*100:.0f}/100")
-    f4.metric("Missing target", f"{profile.missing_target_pct:.1f}%")
-    st.caption("These diagnostics guide interpretation; the model winner is still determined by temporal backtesting.")
+if ts_col is None:
+    with st.expander("Optional mapping helper"):
+        st.write(f"Suggested timestamp candidate: **{infer_timestamp_column(raw) or 'none'}**. This is only a suggestion; nothing is selected automatically.")
+    st.stop()
+
+numeric_candidates = []
+for c in columns:
+    if c == ts_col:
+        continue
+    converted = pd.to_numeric(raw[c].astype(str).str.replace(",", "", regex=False), errors="coerce")
+    if converted.notna().mean() >= 0.70:
+        numeric_candidates.append(c)
+if not numeric_candidates:
+    st.error("No column is numeric enough to use as a forecasting target after selecting the timestamp.")
+    st.stop()
+
+target_default = numeric_candidates.index("load") if source == "Built-in energy example" and "load" in numeric_candidates else None
+target_col = st.selectbox(
+    "Target column to forecast",
+    numeric_candidates,
+    index=target_default,
+    placeholder="Choose the target",
+    help="This is the variable ForecastOS will predict.",
+)
+if target_col is None:
+    with st.expander("Optional mapping helper"):
+        suggestion = infer_target_column(raw, ts_col)
+        st.write(f"Suggested numeric target candidate: **{suggestion or 'none'}**. You remain in control of the selection.")
+    st.stop()
+
+feature_candidates = [c for c in columns if c not in {ts_col, target_col}]
+future_feature_cols = st.multiselect(
+    "Features whose future values will be available",
+    feature_candidates,
+    default=[],
+    help="Examples: weather forecast, tariff schedule, holidays, promotions. Select a feature only if you can supply its value for every future forecast step. Leaving this empty produces a target-history + calendar forecast.",
+)
+
+feature_scan = analyze_features(raw, ts_col, target_col)
+with st.expander("Feature audit — advisory only"):
+    st.caption("ForecastOS can flag sparse, ID-like or leakage-looking columns, but it does not automatically add them to the model.")
+    if feature_scan.empty:
+        st.write("No additional columns to audit.")
+    else:
+        st.dataframe(feature_scan, use_container_width=True, hide_index=True)
+
+# Initial time profile solely to convert step counts to real time.
+try:
+    raw_profile = profile_timeseries(raw, ts_col, target_col)
+except Exception as exc:
+    st.error(f"The selected timestamp/target mapping cannot form a time series: {exc}")
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# 3. WINDOWS
+# -----------------------------------------------------------------------------
+step_header(3, "Define the sliding window and forecast horizon")
+max_context = max(2, min(720, max(2, len(raw) // 3)))
+max_horizon = max(1, min(336, max(1, len(raw) // 5)))
+w1, w2 = st.columns(2)
+history_window = int(w1.number_input(
+    "Previous steps used as history",
+    min_value=2,
+    max_value=max_context,
+    value=min(24, max_context),
+    step=1,
+    help="If you choose 48, the model receives the previous 48 target observations. Sequence models use a 48-row context window; autoregressive tabular models receive lag_1 through lag_48.",
+))
+horizon = int(w2.number_input(
+    "Future steps to forecast",
+    min_value=1,
+    max_value=max_horizon,
+    value=min(12, max_horizon),
+    step=1,
+    help="The exact number of future time steps ForecastOS should predict.",
+))
+
+st.markdown(
+    f'<div class="window">[ previous {history_window} steps ]  →  model  →  [ next {horizon} forecast steps ]</div>',
+    unsafe_allow_html=True,
+)
+wc1, wc2 = st.columns(2)
+wc1.caption(span_text(history_window, raw_profile.median_step_seconds))
+wc2.caption(span_text(horizon, raw_profile.median_step_seconds))
+
+note(
+    "<strong>Weather format:</strong> keep historical weather in ordinary timestamped rows. Do not manually create <code>temp_t-1</code>, <code>temp_t-2</code>, etc. ForecastOS constructs windows internally. If weather will be used for future forecasting, supply a separate future-weather table for the horizon below.",
+    "ok",
+)
+
+# -----------------------------------------------------------------------------
+# 4. PREPROCESSING
+# -----------------------------------------------------------------------------
+step_header(4, "Choose preprocessing")
+p1, p2 = st.columns(2)
+regularize_grid = p1.checkbox(
+    "Repair manageable timestamp gaps",
+    value=True,
+    help="Rebuilds a regular grid only when the inferred interval is sufficiently stable and the expansion is bounded. Target filling remains causal.",
+)
+scaler_choice = p2.selectbox(
+    "Normalization / standardization",
+    ["Auto", "Standard (z-score)", "Robust (median/IQR)", "Min-Max [0,1]"],
+    index=0,
+    help="Scalers are fitted inside each training fold. Auto chooses from the three supported scalers after inspecting the prepared training data.",
+)
+
+try:
+    work, prep_warnings, prep_report = prepare_frame(
+        raw,
+        ts_col,
+        target_col,
+        future_feature_cols,
+        regularize=regularize_grid,
+        return_report=True,
+    )
+except Exception as exc:
+    st.error(f"Preprocessing failed: {exc}")
+    st.stop()
+
+profile = profile_timeseries(work, ts_col, target_col)
+auto_scaler, scaler_diag = recommend_scaler(work, [target_col] + prep_report.model_features)
+scaler_kind = auto_scaler if scaler_choice == "Auto" else {
+    "Standard (z-score)": "standard",
+    "Robust (median/IQR)": "robust",
+    "Min-Max [0,1]": "minmax",
+}[scaler_choice]
+
+pp = st.columns(5)
+pp[0].metric("Rows ready", f"{len(work):,}")
+pp[1].metric("Duplicates merged", prep_report.duplicate_timestamps_aggregated)
+pp[2].metric("Gaps inserted", prep_report.inserted_time_rows)
+pp[3].metric("Missing target after", prep_report.target_missing_after)
+pp[4].metric("Scaler", SCALER_LABELS.get(scaler_kind, scaler_kind))
+if scaler_choice == "Auto":
+    st.caption(f"Auto-scaler reason: {scaler_diag.get('reason', '')}")
+if prep_warnings:
+    with st.expander(f"Preprocessing notes ({len(prep_warnings)})"):
+        for msg in prep_warnings:
+            st.warning(msg)
+
+# -----------------------------------------------------------------------------
+# 5. EXPLICIT FUTURE FEATURES
+# -----------------------------------------------------------------------------
+step_header(5, "Supply future weather / external features")
+expected_ts = future_timestamps(pd.Timestamp(work[ts_col].iloc[-1]), profile.median_step_seconds, horizon)
+future_exog = None
+future_ready = not future_feature_cols
+future_warnings: list[str] = []
+future_alignment = None
+feature_mapping: dict[str, str] = {}
+
+if not future_feature_cols:
+    note("No external future features selected. ForecastOS will use target history and calendar/time features only. It will not invent future weather values.", "ok")
+else:
+    st.write("You selected: **" + ", ".join(future_feature_cols) + "**. Supply one future value per selected feature for every forecast step.")
+    template = pd.DataFrame({ts_col: expected_ts})
+    for c in future_feature_cols:
+        template[c] = np.nan
+    st.download_button(
+        "Download future-feature template",
+        template.to_csv(index=False).encode("utf-8"),
+        file_name="forecastos_future_features_template.csv",
+        mime="text/csv",
+        help="Fill these rows with your weather forecast or other known-future feature values, then upload the file below.",
+    )
+    future_upload = st.file_uploader("Future weather / feature file", type=["csv", "xlsx", "xls", "parquet"], key="future_upload")
+    if future_upload is None:
+        note("A future-feature file is required because external features are selected. You can remove those features to run a target-only forecast.", "warn")
+    else:
+        try:
+            future_raw, future_meta = read_table(future_upload, return_metadata=True)
+        except Exception as exc:
+            st.error(f"Could not read future feature file: {exc}")
+            future_raw = None
+        if future_raw is not None:
+            fc = list(future_raw.columns)
+            st.dataframe(future_raw.head(min(20, horizon)), use_container_width=True, hide_index=True)
+            align_options = ["Use row order (explicit)"] + fc
+            future_alignment = st.selectbox(
+                "How should future rows be aligned?",
+                align_options,
+                index=None,
+                placeholder="Choose row order or a future timestamp column",
+                help="Timestamp alignment is safer for weather data. Row-order alignment is available only when you intentionally prepared the rows in exact forecast order.",
+            )
+            if future_alignment is not None:
+                future_time_col = None if future_alignment == "Use row order (explicit)" else future_alignment
+                st.markdown("**Map each historical feature to its future-data column**")
+                for feat in future_feature_cols:
+                    exact_idx = fc.index(feat) if feat in fc else None
+                    mapped = st.selectbox(
+                        f"Future column for `{feat}`",
+                        fc,
+                        index=exact_idx,
+                        placeholder=f"Choose future values for {feat}",
+                        key=f"future_map__{feat}",
+                    )
+                    if mapped is not None:
+                        feature_mapping[feat] = mapped
+                if len(feature_mapping) == len(future_feature_cols):
+                    try:
+                        future_exog, future_warnings = prepare_future_features(
+                            future_raw,
+                            feature_mapping,
+                            prep_report,
+                            work,
+                            horizon,
+                            expected_timestamps=expected_ts,
+                            future_timestamp_col=future_time_col,
+                        )
+                        future_ready = True
+                        note(f"Future features validated for all {horizon} forecast steps.", "ok")
+                        preview_future = pd.DataFrame({"forecast_timestamp": expected_ts})
+                        for c in future_feature_cols:
+                            preview_future[c] = future_exog[c].to_numpy()
+                        with st.expander("Preview encoded/aligned future features"):
+                            st.dataframe(preview_future, use_container_width=True, hide_index=True)
+                    except Exception as exc:
+                        st.error(f"Future feature validation failed: {exc}")
+                if future_warnings:
+                    for msg in future_warnings:
+                        st.warning(msg)
+
+# -----------------------------------------------------------------------------
+# 6. MODELS
+# -----------------------------------------------------------------------------
+step_header(6, "Choose model effort")
+m1, m2 = st.columns([1, 1.4])
+mode = m1.radio("Backtest effort", ["Fast", "Balanced", "Maximum accuracy"], index=1, horizontal=False)
+
+torch_ok = torch_available()
+deep_options = ["Deep MLP AR"] + (["LSTM", "TCN", "Transformer"] if torch_ok else [])
+deep_models = m2.multiselect(
+    "Optional deep-learning models",
+    deep_options,
+    default=[],
+    help="Classical baselines, Ridge AR and gradient boosting remain in the tournament. Deep models are opt-in and must beat simpler models on temporal backtests.",
+)
+if not torch_ok:
+    m2.caption("Install the deep/PyTorch requirements to expose LSTM, TCN and Transformer.")
+burden, burden_text = compute_estimate(len(work), mode, deep_models)
+m2.caption(f"Estimated compute burden: **{burden}** · {burden_text}")
+
+# -----------------------------------------------------------------------------
+# 7. REVIEW + RUN
+# -----------------------------------------------------------------------------
+step_header(7, "Review the experiment and run")
+read = readiness(profile, horizon, len(work))
+review_cols = st.columns(5)
+review_cols[0].metric("Target", target_col)
+review_cols[1].metric("History window", history_window)
+review_cols[2].metric("Forecast horizon", horizon)
+review_cols[3].metric("Future features", len(future_feature_cols))
+review_cols[4].metric("Frequency", profile.inferred_frequency)
+
+st.markdown(
+    f'<div class="window">Target: {target_col} &nbsp;|&nbsp; use t−1 … t−{history_window} &nbsp;|&nbsp; forecast t+1 … t+{horizon} &nbsp;|&nbsp; scaler: {SCALER_LABELS.get(scaler_kind, scaler_kind)}</div>',
+    unsafe_allow_html=True,
+)
+if history_window + horizon * 2 + 12 >= len(work):
+    note("The selected history window/horizon leaves relatively little data for temporal training folds. Reduce the history window or horizon, or provide more history.", "warn")
+if read.issues:
+    with st.expander("Data-readiness notes"):
+        for x in read.issues:
+            st.warning(x)
+
+run_disabled = not future_ready
+run = st.button("Run forecasting tournament", type="primary", disabled=run_disabled, use_container_width=True)
+if run_disabled:
+    st.caption("Run is disabled until all selected future features are explicitly supplied and aligned.")
 
 if run:
-    status = st.status("Running fair temporal backtests…", expanded=True)
-    progress = st.progress(0, text="Preparing model tournament")
+    clear_results()
+    status = st.status("Running temporal backtests…", expanded=True)
+    progress = st.progress(0, text="Preparing models")
 
     def progress_callback(done: int, total: int, model_name: str, state: str) -> None:
         pct = 0 if total <= 0 else min(100, int(100 * done / total))
         human = model_plain_name(model_name)
         if state == "running":
-            progress.progress(pct, text=f"Testing {human} ({model_name})")
+            progress.progress(pct, text=f"Testing {human}")
             status.write(f"Testing **{human}** · `{model_name}`")
         elif state == "failed":
-            status.write(f"⚠️ {human} could not complete and will not be considered for selection.")
+            status.write(f"⚠️ {human} could not complete and was excluded.")
         else:
             progress.progress(pct, text=f"Completed {done} of {total} models")
 
@@ -306,191 +441,124 @@ if run:
             work,
             ts_col,
             target_col,
-            exog_cols,
+            future_feature_cols,
             profile,
-            int(horizon),
+            horizon,
             mode,
             deep_model_names=deep_models,
             progress_callback=progress_callback,
             scaler_kind=scaler_kind,
+            history_window=history_window,
+            future_exog=future_exog,
         )
-        progress.progress(100, text="Model tournament complete")
-        status.update(label=f"Complete · {model_plain_name(result.model_name)} selected by rolling backtests", state="complete", expanded=False)
+        progress.progress(100, text="Tournament complete")
+        status.update(label=f"Complete · {model_plain_name(result.model_name)} selected", state="complete", expanded=False)
     except Exception as exc:
-        status.update(label="Forecasting could not complete", state="error", expanded=True)
-        st.error(f"ForecastOS could not complete this experiment: {exc}")
+        status.update(label="Forecasting failed", state="error", expanded=True)
+        st.error(str(exc))
         st.stop()
+
     st.session_state["forecast_result"] = result
     st.session_state["forecast_profile"] = profile
     st.session_state["forecast_work"] = work
     st.session_state["forecast_config"] = {
-        "ts": ts_col,
+        "timestamp": ts_col,
         "target": target_col,
-        "exog": exog_cols,
-        "horizon": int(horizon),
+        "features": future_feature_cols,
+        "history_window": history_window,
+        "horizon": horizon,
         "mode": mode,
         "deep_models": deep_models,
         "scaler": scaler_kind,
         "regularize": regularize_grid,
+        "future_alignment": future_alignment,
     }
-    st.session_state.pop("stress", None)
-    st.session_state.pop("scenario", None)
 
 result = st.session_state.get("forecast_result")
 if result is None:
-    st.info("When the setup looks right, choose **Run model tournament**. ForecastOS does not train anything until you explicitly start it.")
     st.stop()
 
-cfg = st.session_state["forecast_config"]
-current_cfg = {"ts": ts_col, "target": target_col, "exog": exog_cols, "horizon": int(horizon), "mode": mode, "deep_models": deep_models, "scaler": scaler_kind, "regularize": regularize_grid}
-if cfg != current_cfg:
-    st.warning("The setup has changed since these results were trained. The results below are preserved, but rerun the tournament before making a decision from the new setup.")
-
-# ---------- Decision summary ----------
-st.markdown("## Forecast decision summary")
+# -----------------------------------------------------------------------------
+# RESULTS
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("## Results")
 trust_word, trust_help = trust_label(result.trust_score)
 skill = result.metrics.get("Skill vs baseline (%)", float("nan"))
-summary_cols = st.columns(4)
-summary_cols[0].metric("Selected model", model_plain_name(result.model_name), help=f"Technical model: {result.model_name}")
-summary_cols[1].metric("Forecast Trust", f"{result.trust_score:.0f}/100 · {trust_word}", help=trust_help)
-summary_cols[2].metric("Skill vs baseline", "—" if not np.isfinite(skill) else f"{skill:+.1f}%", help="Positive means lower RMSE than the seasonal-naïve benchmark.")
-summary_cols[3].metric("Backtest RMSE", f"{result.metrics['RMSE']:.3f}")
+r = st.columns(5)
+r[0].metric("Selected model", model_plain_name(result.model_name), help=f"Technical model: {result.model_name}")
+r[1].metric("Forecast Trust", f"{result.trust_score:.0f}/100 · {trust_word}", help=trust_help)
+r[2].metric("RMSE", f"{result.metrics['RMSE']:.3f}")
+r[3].metric("MAE", f"{result.metrics['MAE']:.3f}")
+r[4].metric("Skill vs seasonal", "—" if not np.isfinite(skill) else f"{skill:+.1f}%")
 
 if skill < 0:
-    note("<strong>Decision caution:</strong> the selected model did not improve on the seasonal baseline. Investigate the data, horizon or model setup before relying on this forecast.", "caution")
+    note("The selected model did not beat the seasonal-naïve baseline. Treat the forecast cautiously and reconsider the history window, horizon, or data.", "bad")
 elif result.trust_score < 70:
-    note(f"<strong>{trust_word} trust:</strong> use this forecast as supporting evidence and inspect the weak trust components before acting.", "review")
+    note("Backtests show useful signal, but trust is not yet strong. Inspect fold stability and stress tests before operational use.", "warn")
 else:
-    note(f"<strong>{trust_word} trust:</strong> backtests support using the forecast for planning, while the empirical interval and domain judgment remain important.", "ready")
+    note("Backtests support the selected model relative to the tested alternatives. Continue to use uncertainty intervals and domain judgment.", "ok")
 
-failures = result.diagnostics.get("model_failures", {})
-if failures:
-    with st.expander(f"{len(failures)} model{'s' if len(failures) != 1 else ''} could not complete"):
-        for name, why in failures.items():
-            st.write(f"**{model_plain_name(name)} ({name})** — {why}")
-        st.caption("A failed model is excluded from winner selection; other models remain comparable within the completed tournament.")
-
-# Progressive disclosure: decision-first overview, technical detail in focused tabs.
-overview_tab, compare_tab, explain_tab, stress_tab, analyst_tab, export_tab = st.tabs([
-    "Forecast",
-    "Model comparison",
-    "Explainability",
-    "Stress & scenarios",
-    "AI analyst",
-    "Export & details",
+forecast_tab, compare_tab, explain_tab, stress_tab, analyst_tab, export_tab = st.tabs([
+    "Forecast", "Model comparison", "Explainability", "Stress & scenarios", "AI analyst", "Export & reproducibility"
 ])
 
-with overview_tab:
-    st.subheader("Forecast and uncertainty")
-    hist = work[[ts_col, target_col]].tail(max(100, 4 * int(horizon)))
+with forecast_tab:
+    hist = work[[ts_col, target_col]].tail(max(history_window * 2, horizon * 4, 100))
     f = result.forecast
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=hist[ts_col], y=hist[target_col], mode="lines", name="Observed history"))
-    fig2.add_trace(go.Scatter(x=f["timestamp"], y=f["upper_90"], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
-    fig2.add_trace(go.Scatter(x=f["timestamp"], y=f["lower_90"], mode="lines", fill="tonexty", line=dict(width=0), name="90% empirical interval"))
-    fig2.add_trace(go.Scatter(x=f["timestamp"], y=f["forecast"], mode="lines+markers", name="Forecast", line=dict(width=2.6)))
-    fig2.update_layout(height=440, margin=dict(l=8, r=8, t=12, b=8), hovermode="x unified", xaxis_title="Time", yaxis_title=target_col, legend_title_text="")
-    st.plotly_chart(fig2, use_container_width=True, config={"displaylogo": False})
-    st.caption("The shaded band is built from 90th-percentile absolute errors observed in rolling backtests. It is an empirical uncertainty aid, not a guaranteed coverage probability.")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist[ts_col], y=hist[target_col], mode="lines", name="Observed history"))
+    fig.add_trace(go.Scatter(x=f["timestamp"], y=f["upper_90"], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=f["timestamp"], y=f["lower_90"], mode="lines", fill="tonexty", line=dict(width=0), name="90% empirical interval"))
+    fig.add_trace(go.Scatter(x=f["timestamp"], y=f["forecast"], mode="lines+markers", name="Forecast", line=dict(width=2.5)))
+    fig.update_layout(height=460, margin=dict(l=8, r=8, t=12, b=8), hovermode="x unified", xaxis_title="Time", yaxis_title=target_col, legend_title_text="")
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.caption(f"Model input uses the previous {history_window} steps and predicts the next {horizon} steps recursively. The interval is empirical from rolling-backtest absolute errors.")
 
-    b1, b2, b3, b4 = st.columns(4)
-    b1.metric("MAE", f"{result.metrics['MAE']:.3f}", help="Average absolute forecast error in target units.")
-    b2.metric("sMAPE", f"{result.metrics['sMAPE']:.2f}%", help="Symmetric percentage error; safer than MAPE around small values.")
-    b3.metric("MASE", f"{result.metrics['MASE']:.3f}", help="Error scaled by a seasonal-naïve benchmark. Below 1 is better than that benchmark.")
-    b4.metric("Horizon", f"{len(result.forecast)} steps")
-    with st.expander("See complete validation metrics"):
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Median AE", f"{result.metrics['MdAE']:.3f}")
-        mc2.metric("WAPE", f"{result.metrics['WAPE']:.2f}%")
-        mc3.metric("MAPE", "—" if not np.isfinite(result.metrics['MAPE']) else f"{result.metrics['MAPE']:.2f}%")
-        mc4.metric("NRMSE / std", f"{result.metrics['NRMSE(std)']:.3f}")
-        mc5, mc6, mc7 = st.columns(3)
-        mc5.metric("R²", "—" if not np.isfinite(result.metrics['R²']) else f"{result.metrics['R²']:.3f}")
-        mc6.metric("Forecast bias", f"{result.metrics['Bias']:+.3f}", help="Actual minus prediction. Positive means under-forecasting on average.")
-        mc7.metric("Direction accuracy", "—" if not np.isfinite(result.metrics['Directional accuracy (%)']) else f"{result.metrics['Directional accuracy (%)']:.1f}%")
-        st.caption("ForecastOS reports multiple complementary metrics because no single error measure is reliable for every scale, zero pattern or business objective.")
-
-    st.markdown("**What to check before acting**")
-    checks = []
-    if profile.drift_score >= 0.6:
-        checks.append("High drift: recent behavior differs from earlier training history.")
-    if result.trust_score < 70:
-        checks.append("Trust is below 70: inspect the trust decomposition and backtest folds.")
-    if not np.isfinite(skill) or skill <= 0:
-        checks.append("No positive skill over the seasonal baseline was demonstrated.")
-    if not checks:
-        checks.append("No major prototype warning is active. Still compare the interval with the cost of being wrong in your domain.")
-    for x in checks:
-        st.write(f"• {x}")
+    metric_order = ["MAE", "MdAE", "RMSE", "NRMSE(std)", "MAPE", "sMAPE", "WAPE", "MASE", "R²", "Bias", "Directional accuracy (%)", "Skill vs baseline (%)"]
+    rows = []
+    for k in metric_order:
+        if k in result.metrics:
+            rows.append({"Metric": k, "Value": result.metrics[k]})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 with compare_tab:
-    st.subheader("Why this model won")
     board = result.leaderboard.copy()
     board.insert(1, "Plain-language model", board["Model"].map(model_plain_name))
-    st.dataframe(
-        board.style.format({"MAE": "{:.3f}", "MdAE": "{:.3f}", "RMSE": "{:.3f}", "NRMSE(std)": "{:.3f}", "MAPE": "{:.2f}", "sMAPE": "{:.2f}", "WAPE": "{:.2f}", "MASE": "{:.3f}", "R²": "{:.3f}", "Bias": "{:+.3f}", "Directional accuracy (%)": "{:.1f}", "Skill vs baseline (%)": "{:+.2f}", "Backtest seconds": "{:.2f}"}),
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.caption("Winner selection prioritizes the lowest rolling-backtest RMSE, using computation time only as a tie-breaker. Complexity itself receives no bonus.")
-
-    st.markdown("### Trust decomposition")
+    st.dataframe(board, use_container_width=True, hide_index=True)
+    st.caption("The winner is the model with the lowest rolling-backtest RMSE; compute time is only a tie-breaker. More complex models receive no preference.")
     trust_df = pd.DataFrame({"Component": list(result.trust_components.keys()), "Score": list(result.trust_components.values())}).sort_values("Score")
     st.bar_chart(trust_df.set_index("Component"), horizontal=True)
-    st.dataframe(trust_df.style.format({"Score": "{:.1f}"}), use_container_width=True, hide_index=True)
-    st.caption("Forecast Trust is a heuristic decision aid built from baseline improvement, backtest stability, data quality, history adequacy and drift. It is not a probability that a forecast is correct.")
-
     with st.expander("Backtest fold details"):
-        st.dataframe(result.diagnostics["backtest_folds"].style.format({"MAE": "{:.3f}", "MdAE": "{:.3f}", "RMSE": "{:.3f}", "NRMSE(std)": "{:.3f}", "MAPE": "{:.2f}", "sMAPE": "{:.2f}", "WAPE": "{:.2f}", "MASE": "{:.3f}", "R²": "{:.3f}", "Bias": "{:+.3f}", "Directional accuracy (%)": "{:.1f}"}), use_container_width=True, hide_index=True)
-        st.caption("Large differences between folds can indicate regime sensitivity or unstable generalization.")
+        st.dataframe(result.diagnostics["backtest_folds"], use_container_width=True, hide_index=True)
 
 with explain_tab:
-    st.subheader("What influenced the selected model?")
     if result.feature_importance.empty:
-        st.info("This winner does not expose a feature-based explanation in the current prototype. Its selection is still supported by rolling backtests.")
+        st.info("The winning model does not expose feature-based importance in this prototype.")
     else:
-        imp = result.feature_importance.head(12).sort_values("importance")
+        imp = result.feature_importance.head(16).sort_values("importance")
         st.bar_chart(imp.set_index("feature"), horizontal=True)
-        top_names = result.feature_importance.head(3)["feature"].tolist()
-        st.write("The strongest measured predictive sensitivities were **" + ", ".join(top_names) + "**.")
-        if result.model_name in {"LSTM", "TCN", "Transformer"}:
-            st.caption("For the selected sequence model, importance is channel-level permutation sensitivity on held-out training-tail examples.")
-        else:
-            st.caption("For supervised autoregressive models, importance is permutation sensitivity over fitted predictors.")
-        note("<strong>Interpretation boundary:</strong> predictive importance is not causation. A high score means the model relied on that signal; it does not prove changing the variable will cause the target to change.")
-
-    st.markdown("### Explanation vocabulary")
-    with st.expander("Recognize common feature names"):
-        st.write("• `lag_24` means the target value 24 steps earlier.")
-        st.write("• `hour_sin/hour_cos` encode time-of-day cyclically.")
-        st.write("• `dow_sin/dow_cos` encode day-of-week cyclically.")
-        st.write("• `exog__temperature` means the selected known-at-forecast-time temperature feature.")
+        st.caption("Predictive sensitivity is not causation. Sequence-model explanations distinguish historical channels from `future__feature` values supplied for the forecast step.")
+    st.markdown(f"**History window:** lag_1 through lag_{history_window} for supervised autoregressive models; an exact {history_window}-row sliding sequence for LSTM/TCN/Transformer.")
 
 with stress_tab:
-    st.subheader("Challenge the forecast before trusting it")
-    st.write("Stress tests perturb recent context and measure how much the winning forecast changes. Lower sensitivity is generally more stable.")
-    if st.button("Run stress tests", key="stress_button"):
-        with st.status("Running controlled perturbations…", expanded=False) as stress_status:
-            ss = stress_test(result, work, ts_col, target_col, exog_cols, profile)
-            st.session_state["stress"] = ss
-            stress_status.update(label="Stress tests complete", state="complete")
+    if st.button("Run stress tests", key="stress_run"):
+        with st.status("Perturbing recent target context…", expanded=False) as ss:
+            st.session_state["stress"] = stress_test(result, work, ts_col, target_col, future_feature_cols, profile)
+            ss.update(label="Stress tests complete", state="complete")
     if "stress" in st.session_state:
-        ss = st.session_state["stress"]
-        st.dataframe(ss.style.format({"Forecast sensitivity (%)": "{:.2f}", "Stability score": "{:.1f}"}), use_container_width=True, hide_index=True)
-        st.caption("These are controlled sensitivity tests, not estimates of future accuracy under real-world shocks.")
+        st.dataframe(st.session_state["stress"], use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Scenario lab")
-    scenario_candidates = [c for c in prep_report.numeric_features if c in exog_cols]
+    scenario_candidates = [c for c in prep_report.numeric_features if c in future_feature_cols]
     if scenario_candidates:
-        sc1, sc2 = st.columns(2)
-        scenario_col = sc1.selectbox("Change a known numeric feature", scenario_candidates)
-        pct = sc2.slider("Scenario change (%)", -50, 50, 10, 1)
-        st.caption("This asks how the fitted model responds when the selected future feature is shifted. It is not a causal intervention estimate.")
-        if st.button("Compare scenario with baseline", key="scenario_button"):
+        c1, c2 = st.columns(2)
+        scenario_col = c1.selectbox("Future feature to perturb", scenario_candidates)
+        pct = c2.slider("Change across future horizon (%)", -50, 50, 10, 1)
+        if st.button("Run scenario", key="scenario_run"):
             try:
-                scenario = scenario_forecast(result, work, ts_col, exog_cols, scenario_col, pct)
-                st.session_state["scenario"] = scenario
+                st.session_state["scenario"] = scenario_forecast(result, work, ts_col, future_feature_cols, scenario_col, pct)
             except Exception as exc:
                 st.warning(str(exc))
         if "scenario" in st.session_state:
@@ -502,72 +570,46 @@ with stress_tab:
             st.plotly_chart(sf, use_container_width=True, config={"displaylogo": False})
             st.metric("Average model response", f"{sc['delta_pct'].mean():+.2f}%")
     else:
-        st.info("To use percentage scenarios, select at least one numeric feature that is genuinely known at forecast time, then rerun the model tournament.")
+        st.info("Select and explicitly upload at least one numeric future feature to use the scenario lab.")
 
 with analyst_tab:
-    st.subheader("AI forecast scientist")
     st.markdown(deterministic_brief(result, profile))
-    st.caption("The AI analyst receives structured experiment evidence rather than the raw uploaded dataset.")
-
-    starter = st.selectbox(
-        "Start with a question",
-        [
-            "Choose a question…",
-            "Why did ForecastOS select this model?",
-            "What is the biggest reliability risk?",
-            "Which signals mattered most?",
-            "Is this forecast strong enough to support a decision?",
-            "What experiment should I run next?",
-        ],
-        help="Example questions reduce the need to remember forecasting terminology. You can also type your own question below.",
-    )
-    custom = st.text_input("Or ask your own question", placeholder="Example: Why does confidence weaken at longer horizons?")
-    question = custom.strip() or (starter if starter != "Choose a question…" else "")
-    api_ready = bool(os.getenv("OPENAI_API_KEY"))
-    if question and st.button("Answer from experiment evidence", type="primary", key="ask_button"):
-        if api_ready:
-            with st.status("Grounding the answer in experiment evidence…", expanded=False):
-                try:
-                    answer = ask_openai(question, result, profile)
-                    st.write(answer)
-                except Exception as exc:
-                    st.warning(f"The AI analyst is unavailable: {exc}")
+    st.caption("The optional AI analyst receives structured experiment evidence, not the raw uploaded dataset.")
+    q = st.text_input("Ask about this experiment", placeholder="Why did this model win, and what is the biggest reliability risk?")
+    if q and st.button("Ask AI analyst", key="ai_ask"):
+        if os.getenv("OPENAI_API_KEY"):
+            try:
+                st.write(ask_openai(q, result, profile))
+            except Exception as exc:
+                st.warning(f"AI analyst unavailable: {exc}")
         else:
-            st.info("AI analysis is optional and currently disabled. Add `OPENAI_API_KEY` to Streamlit Secrets. Numerical forecasting does not require an API key.")
+            st.info("Add OPENAI_API_KEY to Streamlit Secrets to enable the optional analyst. Forecasting itself does not need an API key.")
 
 with export_tab:
-    st.subheader("Export forecast")
-    export = result.forecast.copy()
     st.download_button(
-        "Download forecast as CSV",
-        export.to_csv(index=False).encode("utf-8"),
+        "Download forecast CSV",
+        result.forecast.to_csv(index=False).encode("utf-8"),
         file_name="forecastos_forecast.csv",
         mime="text/csv",
-        use_container_width=False,
     )
-    st.caption("Export includes timestamp, point forecast, and empirical 90% lower/upper bounds.")
-
-    st.markdown("### Reproducibility details")
     st.json({
-        "selected_model": result.model_name,
-        "plain_language_model": model_plain_name(result.model_name),
+        "timestamp_column": ts_col,
         "target": target_col,
+        "history_window_previous_steps": history_window,
+        "forecast_horizon_steps": horizon,
         "frequency": profile.inferred_frequency,
-        "seasonal_period": profile.selected_seasonal_period,
-        "known_at_forecast_time_features": exog_cols,
-        "forecast_horizon_steps": int(horizon),
-        "search_mode": mode,
-        "deep_models_requested": deep_models,
+        "future_features": future_feature_cols,
+        "future_feature_mapping": feature_mapping,
+        "future_alignment": future_alignment,
         "scaler": SCALER_LABELS.get(scaler_kind, scaler_kind),
-        "timestamp_regularization": regularize_grid,
-        "preprocessing": {"duplicates_aggregated": prep_report.duplicate_timestamps_aggregated, "inserted_rows": prep_report.inserted_time_rows, "missing_target_before": prep_report.target_missing_before, "missing_target_after": prep_report.target_missing_after},
-        "models_attempted": result.diagnostics.get("models_attempted", []),
+        "regularize_timestamp_grid": regularize_grid,
+        "selected_model": result.model_name,
+        "deep_models_requested": deep_models,
         "metrics": result.metrics,
         "trust_score": result.trust_score,
     })
     with st.expander("Important limitations"):
-        st.write("• One numeric target is forecast per experiment in this release.")
-        st.write("• Final future covariates default to their latest observed value unless changed in the scenario lab.")
-        st.write("• Empirical intervals use rolling-backtest residuals and are not formal coverage guarantees.")
-        st.write("• Feature importance and scenarios describe model behavior, not causal effects.")
-        st.write("• Deep models can overfit short series; they remain subject to the same baseline comparison as simpler models.")
+        st.write("• ForecastOS does not fabricate future external-feature values. Selected weather/exogenous variables require an explicit future file.")
+        st.write("• Backtests use the historically observed values of features selected as future-known; only select variables that would genuinely have been available at the forecast origin.")
+        st.write("• Forecast intervals are empirical residual bands, not guaranteed probability coverage.")
+        st.write("• Explainability and scenario responses describe model behavior, not causal effects.")

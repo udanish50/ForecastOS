@@ -4,7 +4,18 @@ import numpy as np
 import pandas as pd
 
 
-def choose_lags(n: int, seasonal_period: int) -> list[int]:
+def choose_lags(n: int, seasonal_period: int, history_window: int | None = None) -> list[int]:
+    """Return autoregressive lags.
+
+    When ``history_window`` is provided, ForecastOS uses an explicit sliding
+    window: every previous step from 1..history_window becomes available to
+    supervised autoregressive models. This makes the user-selected context
+    length the source of truth instead of silently guessing lags.
+    """
+    if history_window is not None:
+        max_allowed = max(1, min(int(history_window), max(1, n - 2)))
+        return list(range(1, max_allowed + 1))
+
     base = [1, 2, 3, 6, 12, 24]
     if seasonal_period > 1:
         base += [seasonal_period, max(1, seasonal_period - 1), seasonal_period + 1]

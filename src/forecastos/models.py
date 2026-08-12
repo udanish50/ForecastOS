@@ -9,6 +9,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import Ridge
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from .features import choose_lags, make_row, supervised_frame
 from .scaling import make_scaler
@@ -68,16 +69,17 @@ class DeepMLPForecaster(BaseForecaster):
     supports_exog = True
     name = "Deep MLP AR"
 
-    def __init__(self, training_level: str = "balanced", scaler_kind: str = "standard"):
+    def __init__(self, training_level: str = "balanced", scaler_kind: str = "standard", history_window: int | None = None):
         self.training_level = training_level.lower()
         self.scaler_kind = scaler_kind
+        self.history_window = history_window
 
     def fit(self, df, timestamp_col, target_col, exog_cols, seasonal_period):
         self.timestamp_col = timestamp_col
         self.target_col = target_col
         self.exog_cols = list(exog_cols or [])
         self.history = pd.to_numeric(df[target_col], errors="coerce").to_numpy(dtype=float).tolist()
-        self.lags = choose_lags(len(df), seasonal_period)
+        self.lags = choose_lags(len(df), seasonal_period, self.history_window)
         X, y = supervised_frame(df, timestamp_col, target_col, self.lags, self.exog_cols)
         if len(X) < 40:
             raise ValueError("Not enough rows after lag construction for the deep MLP model.")
@@ -130,9 +132,10 @@ class DeepMLPForecaster(BaseForecaster):
 class RegressionForecaster(BaseForecaster):
     supports_exog = True
 
-    def __init__(self, kind: str = "ridge", scaler_kind: str = "standard"):
+    def __init__(self, kind: str = "ridge", scaler_kind: str = "standard", history_window: int | None = None):
         self.kind = kind
         self.scaler_kind = scaler_kind
+        self.history_window = history_window
         self.name = "Ridge AR" if kind == "ridge" else "HistGradientBoosting AR"
 
     def fit(self, df, timestamp_col, target_col, exog_cols, seasonal_period):
@@ -140,7 +143,7 @@ class RegressionForecaster(BaseForecaster):
         self.target_col = target_col
         self.exog_cols = list(exog_cols or [])
         self.history = pd.to_numeric(df[target_col], errors="coerce").to_numpy(dtype=float).tolist()
-        self.lags = choose_lags(len(df), seasonal_period)
+        self.lags = choose_lags(len(df), seasonal_period, self.history_window)
         X, y = supervised_frame(df, timestamp_col, target_col, self.lags, self.exog_cols)
         if len(X) < 12:
             raise ValueError("Not enough rows after lag construction for regression model.")
@@ -182,14 +185,19 @@ class RegressionForecaster(BaseForecaster):
         return np.asarray(preds, dtype=float)
 
 
-def build_model_zoo(mode: str = "Balanced", include_mlp: bool = False, deep_model_names: list[str] | None = None, scaler_kind: str = "standard") -> list[BaseForecaster]:
+def build_model_zoo(mode: str = "Balanced", include_mlp: bool = False, deep_model_names: list[str] | None = None, scaler_kind: str = "standard", history_window: int | None = None) -> list[BaseForecaster]:
     mode_lower = mode.lower()
-    models: list[BaseForecaster] = [NaiveForecaster(), SeasonalNaiveForecaster(), DriftForecaster(), RegressionForecaster("ridge", scaler_kind=scaler_kind)]
+    models: list[BaseForecaster] = [
+        NaiveForecaster(),
+        SeasonalNaiveForecaster(),
+        DriftForecaster(),
+        RegressionForecaster("ridge", scaler_kind=scaler_kind, history_window=history_window),
+    ]
     if mode_lower in {"balanced", "maximum accuracy"}:
-        models.append(RegressionForecaster("hgb", scaler_kind=scaler_kind))
+        models.append(RegressionForecaster("hgb", scaler_kind=scaler_kind, history_window=history_window))
     if include_mlp:
-        models.append(DeepMLPForecaster(mode_lower, scaler_kind=scaler_kind))
+        models.append(DeepMLPForecaster(mode_lower, scaler_kind=scaler_kind, history_window=history_window))
     if deep_model_names:
         from .deep_models import build_torch_models
-        models.extend(build_torch_models(deep_model_names, mode_lower, scaler_kind=scaler_kind))
+        models.extend(build_torch_models(deep_model_names, mode_lower, scaler_kind=scaler_kind, history_window=history_window))
     return models
