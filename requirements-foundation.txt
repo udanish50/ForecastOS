@@ -1,0 +1,4 @@
+# OPTIONAL local/GPU extension. Do not use this file as Streamlit Community Cloud's dependency file.
+# Install explicitly in a separate environment for foundation-model adapters.
+chronos-forecasting>=2.2
+# TimesFM has platform-specific requirements; install according to its official repository.
